@@ -1,6 +1,7 @@
 [package]
 name = "calloop-wayland-source"
 description = "A wayland-rs client event source for callloop"
+repository = "https://github.com/smithay/calloop-wayland-source"
 version = "0.1.0"
 edition = "2021"
 authors = ["Kirill Chibisov <contact@kchibisov.com>"]

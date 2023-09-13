@@ -184,7 +184,6 @@ impl<D> EventSource for WaylandSource<D> {
         self.fd.unregister(poll)
     }
 
-    // This is quite subtle
     const NEEDS_EXTRA_LIFECYCLE_EVENTS: bool = true;
 
     fn before_sleep(&mut self) -> calloop::Result<Option<(Readiness, Token)>> {
@@ -201,13 +200,16 @@ impl<D> EventSource for WaylandSource<D> {
         }
 
         // TODO: ensure we are not waiting for messages that are already in the buffer.
-        // is this needed?
+        // is this needed? I think in the case that this would occur, getting the guard
+        // would fail anyway
         // Self::loop_callback_pending(&mut self.queue, &mut callback)?;
         self.read_guard = self.queue.prepare_read();
         match self.read_guard {
             // If getting the guard failed
             Some(_) => Ok(None),
             // The readiness value is never used, we just need some marker
+            // If getting the guard failed, we need to process the events 'instantly'
+            // tell calloop this
             None => Ok(Some((Readiness::EMPTY, self.fake_token.unwrap()))),
         }
     }
@@ -228,7 +230,8 @@ impl<D> EventSource for WaylandSource<D> {
                 }
             }
         }
-        // Otherwise, drop the guard, as we don't want to do any reading when the fd is not polled
+        // Otherwise, drop the guard if we have it, as we don't want to do any reading when we didn't
+        // get any events
     }
 }
 

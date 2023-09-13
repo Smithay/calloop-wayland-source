@@ -121,6 +121,8 @@ impl<D> EventSource for WaylandSource<D> {
     type Metadata = EventQueue<D>;
     type Ret = Result<usize, DispatchError>;
 
+    const NEEDS_EXTRA_LIFECYCLE_EVENTS: bool = true;
+
     fn process_events<F>(
         &mut self,
         readiness: Readiness,
@@ -184,8 +186,6 @@ impl<D> EventSource for WaylandSource<D> {
         self.fd.unregister(poll)
     }
 
-    const NEEDS_EXTRA_LIFECYCLE_EVENTS: bool = true;
-
     fn before_sleep(&mut self) -> calloop::Result<Option<(Readiness, Token)>> {
         debug_assert!(self.read_guard.is_none());
 
@@ -230,8 +230,8 @@ impl<D> EventSource for WaylandSource<D> {
                 }
             }
         }
-        // Otherwise, drop the guard if we have it, as we don't want to do any reading when we didn't
-        // get any events
+        // Otherwise, drop the guard if we have it, as we don't want to do any
+        // reading when we didn't get any events
     }
 }
 

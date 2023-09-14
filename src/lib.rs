@@ -152,16 +152,7 @@ impl<D> EventSource for WaylandSource<D> {
         Self::loop_callback_pending(queue, &mut callback)?;
 
         // Once dispatching is finished, flush the responses to the compositor
-        if let Err(WaylandError::Io(e)) = queue.flush() {
-            if e.kind() != io::ErrorKind::WouldBlock {
-                // in case of error, forward it and fast-exit
-                return Err(e.into());
-            }
-            // WouldBlock error means the compositor could not process all
-            // our messages quickly. Either it is slowed
-            // down or we are a spammer. Should not really
-            // happen, if it does we do nothing and will flush again later
-        }
+        flush_queue(queue)?;
 
         Ok(PostAction::Continue)
     }
@@ -190,15 +181,7 @@ impl<D> EventSource for WaylandSource<D> {
     fn before_sleep(&mut self) -> calloop::Result<Option<(Readiness, Token)>> {
         debug_assert!(self.read_guard.is_none());
 
-        // flush the display before starting to poll
-        if let Err(WaylandError::Io(err)) = self.queue.flush() {
-            if err.kind() != io::ErrorKind::WouldBlock {
-                // in case of error, don't prepare a read, if the error is persistent, it'll
-                // trigger in other wayland methods anyway
-                log_error!("Error trying to flush the wayland display: {}", err);
-                return Err(err.into());
-            }
-        }
+        flush_queue(&mut self.queue)?;
 
         self.read_guard = self.queue.prepare_read();
         match self.read_guard {
@@ -232,6 +215,21 @@ impl<D> EventSource for WaylandSource<D> {
         // Otherwise, drop the guard if we have it, as we don't want to do any
         // reading when we didn't get any events
     }
+}
+
+fn flush_queue<D>(queue: &mut EventQueue<D>) -> Result<(), calloop::Error> {
+    if let Err(WaylandError::Io(err)) = queue.flush() {
+        if err.kind() != io::ErrorKind::WouldBlock {
+            // in case of error, forward it and fast-exit
+            log_error!("Error trying to flush the wayland display: {}", err);
+            return Err(err.into());
+        }
+        // WouldBlock error means the compositor could not process all
+        // our messages quickly. Either it is slowed
+        // down or we are a spammer. Should not really
+        // happen, if it does we do nothing and will flush again later
+    }
+    Ok(())
 }
 
 impl<D> WaylandSource<D> {

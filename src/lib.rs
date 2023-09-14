@@ -151,7 +151,7 @@ impl<D> EventSource for WaylandSource<D> {
         // Dispatch any pending events in the queue
         Self::loop_callback_pending(queue, &mut callback)?;
 
-        // 3. Once dispatching is finished, flush the responses to the compositor
+        // Once dispatching is finished, flush the responses to the compositor
         if let Err(WaylandError::Io(e)) = queue.flush() {
             if e.kind() != io::ErrorKind::WouldBlock {
                 // in case of error, forward it and fast-exit

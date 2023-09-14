@@ -125,8 +125,8 @@ impl<D> EventSource for WaylandSource<D> {
 
     fn process_events<F>(
         &mut self,
-        readiness: Readiness,
-        token: Token,
+        _: Readiness,
+        _: Token,
         mut callback: F,
     ) -> Result<PostAction, Self::Error>
     where
@@ -137,32 +137,27 @@ impl<D> EventSource for WaylandSource<D> {
             return Err(err)?;
         }
 
-        let mut callback = || {
-            // 2. dispatch any pending events in the queue
-            // This is done to ensure we are not waiting for messages that are already in
-            // the buffer.
-            Self::loop_callback_pending(queue, &mut callback)?;
+        // In theory, we would need to call the process_events handler on fd. However,
+        // we know that Generic's process events's call is a no-op, so we can just handle the event ourselves
 
-            // 3. Once dispatching is finished, flush the responses to the compositor
-            if let Err(WaylandError::Io(e)) = queue.flush() {
-                if e.kind() != io::ErrorKind::WouldBlock {
-                    // in case of error, forward it and fast-exit
-                    return Err(e);
-                }
-                // WouldBlock error means the compositor could not process all
-                // our messages quickly. Either it is slowed
-                // down or we are a spammer. Should not really
-                // happen, if it does we do nothing and will flush again later
+        // 2. dispatch any pending events in the queue
+        // This is done to ensure we are not waiting for messages that are already in
+        // the buffer.
+        Self::loop_callback_pending(queue, &mut callback)?;
+
+        // 3. Once dispatching is finished, flush the responses to the compositor
+        if let Err(WaylandError::Io(e)) = queue.flush() {
+            if e.kind() != io::ErrorKind::WouldBlock {
+                // in case of error, forward it and fast-exit
+                return Err(e.into());
             }
-
-            Ok(PostAction::Continue)
-        };
-        if Some(token) == self.fake_token {
-            callback()?;
+            // WouldBlock error means the compositor could not process all
+            // our messages quickly. Either it is slowed
+            // down or we are a spammer. Should not really
+            // happen, if it does we do nothing and will flush again later
         }
-        let action = self.fd.process_events(readiness, token, |_, _| callback())?;
 
-        Ok(action)
+        Ok(PostAction::Continue)
     }
 
     fn register(
@@ -199,14 +194,11 @@ impl<D> EventSource for WaylandSource<D> {
             }
         }
 
-        // TODO: ensure we are not waiting for messages that are already in the buffer.
-        // is this needed? I think in the case that this would occur, getting the guard
-        // would fail anyway
-        // Self::loop_callback_pending(&mut self.queue, &mut callback)?;
         self.read_guard = self.queue.prepare_read();
         match self.read_guard {
-            // If getting the guard failed
             Some(_) => Ok(None),
+            // If getting the guard failed, that means that there are
+            // events in the queue, and
             // The readiness value is never used, we just need some marker
             // If getting the guard failed, we need to process the events 'instantly'
             // tell calloop this
@@ -218,10 +210,10 @@ impl<D> EventSource for WaylandSource<D> {
         let guard = self.read_guard.take();
         if events.count() > 0 {
             // 1. read events from the socket if any are available
-            // If none are available, that means
             if let Some(guard) = guard {
-                // might be None if some other thread read events before us, concurrently
                 if let Err(WaylandError::Io(err)) = guard.read() {
+                    // If some other thread read events before us, concurrently, that's an expected
+                    // case, so this error isn't an issue. Other error kinds do need to be returned, however
                     if err.kind() != io::ErrorKind::WouldBlock {
                         // before_handle_events doesn't allow returning errors
                         // For now, cache it in self until process_events is called

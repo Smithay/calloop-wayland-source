@@ -60,8 +60,13 @@ pub struct WaylandSource<D> {
     queue: EventQueue<D>,
     fd: Generic<FdWrapper<RawFd>>,
     read_guard: Option<ReadEventsGuard>,
+    /// Calloop's before_will_sleep method allows
+    /// skipping the sleeping by returning a `Token`.
+    /// We cannot produce this on the fly, so store it here instead
     fake_token: Option<Token>,
-    stored_error: Option<io::Error>,
+    // Some calloop event handlers don't support error handling, so we have to store the error
+    // for a short time until we reach a method which allows it
+    stored_error: Result<(), io::Error>,
 }
 
 impl<D> WaylandSource<D> {
@@ -70,6 +75,7 @@ impl<D> WaylandSource<D> {
     /// If this returns None, that means that acquiring a read guard failed.
     /// See [EventQueue::prepare_read] for details
     /// This guard is only used to get the wayland file descriptor
+    #[must_use]
     pub fn new(queue: EventQueue<D>) -> Option<WaylandSource<D>> {
         let guard = queue.prepare_read()?;
         let fd = Generic::new(
@@ -79,14 +85,15 @@ impl<D> WaylandSource<D> {
             // that the source is unregistered before dropping it, so the
             // fd cannot be used after being freed
             // Wayland-backend should probably document some guarantees here to make this sound,
-            // but this is unlikely to change
+            // but we know that they are unlikely to make the queue have a different socket/fd
+            // - there is no public API to do so
             unsafe { FdWrapper::new(guard.connection_fd().as_raw_fd()) },
             Interest::READ,
             Mode::Level,
         );
         drop(guard);
 
-        Some(WaylandSource { queue, fd, read_guard: None, fake_token: None, stored_error: None })
+        Some(WaylandSource { queue, fd, read_guard: None, fake_token: None, stored_error: Ok(()) })
     }
 
     /// Access the underlying event queue
@@ -133,16 +140,15 @@ impl<D> EventSource for WaylandSource<D> {
         F: FnMut(Self::Event, &mut Self::Metadata) -> Self::Ret,
     {
         let queue = &mut self.queue;
-        if let Some(err) = self.stored_error.take() {
-            return Err(err)?;
-        }
+        // Take the stored error
+        std::mem::replace(&mut self.stored_error, Ok(()))?;
 
-        // In theory, we would need to call the process_events handler on fd. However,
-        // we know that Generic's process events's call is a no-op, so we can just handle the event ourselves
+        // Because our polling is based on a `Generic` source, in theory we might want
+        // to to call the process_events handler on fd. However,
+        // we know that Generic's `process_events` call is a no-op, so we can just
+        // handle the event ourselves
 
-        // 2. dispatch any pending events in the queue
-        // This is done to ensure we are not waiting for messages that are already in
-        // the buffer.
+        // Dispatch any pending events in the queue
         Self::loop_callback_pending(queue, &mut callback)?;
 
         // 3. Once dispatching is finished, flush the responses to the compositor
@@ -198,10 +204,10 @@ impl<D> EventSource for WaylandSource<D> {
         match self.read_guard {
             Some(_) => Ok(None),
             // If getting the guard failed, that means that there are
-            // events in the queue, and
-            // The readiness value is never used, we just need some marker
-            // If getting the guard failed, we need to process the events 'instantly'
-            // tell calloop this
+            // events in the queue, and so we need to handle the events instantly
+            // rather than waiting on an event in polling. We tell calloop this
+            // by returning Some here. Note that the readiness value is
+            // never used, so we just need some marker
             None => Ok(Some((Readiness::EMPTY, self.fake_token.unwrap()))),
         }
     }
@@ -209,15 +215,16 @@ impl<D> EventSource for WaylandSource<D> {
     fn before_handle_events(&mut self, events: calloop::EventIterator<'_>) {
         let guard = self.read_guard.take();
         if events.count() > 0 {
-            // 1. read events from the socket if any are available
+            // Read events from the socket if any are available
             if let Some(guard) = guard {
                 if let Err(WaylandError::Io(err)) = guard.read() {
                     // If some other thread read events before us, concurrently, that's an expected
-                    // case, so this error isn't an issue. Other error kinds do need to be returned, however
+                    // case, so this error isn't an issue. Other error kinds do need to be returned,
+                    // however
                     if err.kind() != io::ErrorKind::WouldBlock {
                         // before_handle_events doesn't allow returning errors
                         // For now, cache it in self until process_events is called
-                        self.stored_error = Some(err);
+                        self.stored_error = Err(err);
                     }
                 }
             }

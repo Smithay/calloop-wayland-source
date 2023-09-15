@@ -199,8 +199,9 @@ impl<D> EventSource for WaylandSource<D> {
 
     fn before_handle_events(&mut self, events: calloop::EventIterator<'_>) {
         // It's important that the guard isn't held whilst process_events calls occur
-        // This can use arbitrary user-provided code, which may want to use the wayland socket
-        // For example, creating a Vulkan surface needs access to the connection
+        // This can use arbitrary user-provided code, which may want to use the wayland
+        // socket For example, creating a Vulkan surface needs access to the
+        // connection
         let guard = self.read_guard.take();
         if events.count() > 0 {
             // Read events from the socket if any are available

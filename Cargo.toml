@@ -13,6 +13,10 @@ rust-version = "1.65.0"
 [dependencies]
 wayland-client = "0.31.0"
 wayland-backend = "0.3.0"
-calloop = "0.12.0"
+calloop = { git = "https://github.com/DJMcNab/calloop/", rev = "9df1f5c949c3d7f23817b2bcbd5c481ff0ec7e65" }
 log = { version = "0.4.19", optional = true }
 rustix = { version = "0.38.4", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+tempfile = "3.8.0"
+wayland-protocols = { version = "0.31.0", features = ["client"] }

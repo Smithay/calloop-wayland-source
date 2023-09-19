@@ -25,7 +25,7 @@ fn main() {
     let mut event_loop: EventLoop<State> =
         EventLoop::try_new().expect("Failed to initialize the event loop!");
     let loop_handle = event_loop.handle();
-    WaylandSource::new(event_queue).unwrap().insert(loop_handle).unwrap();
+    WaylandSource::new(conn, event_queue).insert(loop_handle).unwrap();
     let stop_handle = event_loop.get_signal();
 
     let mut state = State {

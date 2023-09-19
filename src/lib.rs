@@ -28,17 +28,17 @@
 //! }
 //! ```
 
+#![forbid(unsafe_op_in_unsafe_fn)]
 use std::io;
-use std::os::unix::io::{AsRawFd, RawFd};
 
-use calloop::generic::{FdWrapper, Generic};
+use calloop::generic::Generic;
 use calloop::{
     EventSource, InsertError, Interest, LoopHandle, Mode, Poll, PostAction, Readiness,
     RegistrationToken, Token, TokenFactory,
 };
 use rustix::io::Errno;
 use wayland_backend::client::{ReadEventsGuard, WaylandError};
-use wayland_client::{DispatchError, EventQueue};
+use wayland_client::{Connection, DispatchError, EventQueue};
 
 #[cfg(feature = "log")]
 use log::error as log_error;
@@ -57,8 +57,12 @@ use std::eprintln as log_error;
 /// loop and automatically dispatch pending events on the event queue.
 #[derive(Debug)]
 pub struct WaylandSource<D> {
+    // In theory, we could use the same event queue inside `connection_source`
+    // However, calloop's safety requirements mean that we cannot then give
+    // mutable access to the queue, which is incompatible with our current interface
+    // Additionally, `Connection` is cheaply cloneable, so it's not a huge burden
     queue: EventQueue<D>,
-    fd: Generic<FdWrapper<RawFd>>,
+    connection_source: Generic<Connection>,
     read_guard: Option<ReadEventsGuard>,
     /// Calloop's before_will_sleep method allows
     /// skipping the sleeping by returning a `Token`.
@@ -72,40 +76,34 @@ pub struct WaylandSource<D> {
 impl<D> WaylandSource<D> {
     /// Wrap an [`EventQueue`] as a [`WaylandSource`].
     ///
-    /// If this returns None, that means that acquiring a read guard failed.
-    /// See [EventQueue::prepare_read] for details
-    /// This guard is only used to get the wayland file descriptor
+    /// `queue` must be from the connection `Connection`.
+    /// This is not a safety invariant, but not following this may cause
+    /// freezes or hangs
     #[must_use]
-    pub fn new(queue: EventQueue<D>) -> Option<WaylandSource<D>> {
-        let guard = queue.prepare_read()?;
-        let fd = Generic::new(
-            // Safety: `connection_fd` returns the wayland socket fd,
-            // and EventQueue (eventually) owns this socket
-            // fd is only used in calloop, which guarantees
-            // that the source is unregistered before dropping it, so the
-            // fd cannot be used after being freed
-            // Wayland-backend should probably document some guarantees here to make this sound,
-            // but we know that they are unlikely to make the queue have a different socket/fd
-            // - there is no public API to do so
-            unsafe { FdWrapper::new(guard.connection_fd().as_raw_fd()) },
-            Interest::READ,
-            Mode::Level,
-        );
-        drop(guard);
+    pub fn new(connection: Connection, queue: EventQueue<D>) -> WaylandSource<D> {
+        let connection_source = Generic::new(connection, Interest::READ, Mode::Level);
 
-        Some(WaylandSource { queue, fd, read_guard: None, fake_token: None, stored_error: Ok(()) })
+        WaylandSource {
+            queue,
+            connection_source,
+            read_guard: None,
+            fake_token: None,
+            stored_error: Ok(()),
+        }
     }
 
     /// Access the underlying event queue
     ///
-    /// Note that you should be careful when interacting with it if you invoke
-    /// methods that interact with the wayland socket (such as `dispatch()`
-    /// or `prepare_read()`). These may interfere with the proper waking up
-    /// of this event source in the event loop.
+    /// Note that you should not replace this queue with a queue from a different
+    /// `Connection`, as that may cause freezes or other hangs.
     pub fn queue(&mut self) -> &mut EventQueue<D> {
         &mut self.queue
     }
 
+    /// Access the connection to the Wayland server
+    pub fn connection(&self) -> &Connection {
+        self.connection_source.get_ref()
+    }
     /// Insert this source into the given event loop.
     ///
     /// This adapter will pass the event loop's shared data as the `D` type for
@@ -141,15 +139,18 @@ impl<D> EventSource for WaylandSource<D> {
     {
         debug_assert!(self.read_guard.is_none());
 
-        let queue = &mut self.queue;
         // Take the stored error
         std::mem::replace(&mut self.stored_error, Ok(()))?;
 
-        // Because our polling is based on a `Generic` source, in theory we might want
-        // to to call the process_events handler on fd. However,
-        // we know that Generic's `process_events` call is a no-op, so we can just
-        // handle the event ourselves
+        // We know that the event will either be a fake event
+        // produced in `before_will_sleep`, or a "real" event from the underlying
+        // source (self.queue_events). Our behaviour in both cases is the same.
+        // In theory we might want to call the process_events handler on the underlying
+        // event source. However, we know that Generic's `process_events` call is a no-op,
+        // so we just handle the event ourselves.
 
+        // Safety: We don't replace the
+        let queue = &mut self.queue;
         // Dispatch any pending events in the queue
         Self::loop_callback_pending(queue, &mut callback)?;
 
@@ -165,7 +166,7 @@ impl<D> EventSource for WaylandSource<D> {
         token_factory: &mut TokenFactory,
     ) -> calloop::Result<()> {
         self.fake_token = Some(token_factory.token());
-        self.fd.register(poll, token_factory)
+        self.connection_source.register(poll, token_factory)
     }
 
     fn reregister(
@@ -173,11 +174,11 @@ impl<D> EventSource for WaylandSource<D> {
         poll: &mut Poll,
         token_factory: &mut TokenFactory,
     ) -> calloop::Result<()> {
-        self.fd.reregister(poll, token_factory)
+        self.connection_source.reregister(poll, token_factory)
     }
 
     fn unregister(&mut self, poll: &mut Poll) -> calloop::Result<()> {
-        self.fd.unregister(poll)
+        self.connection_source.unregister(poll)
     }
 
     fn before_sleep(&mut self) -> calloop::Result<Option<(Readiness, Token)>> {

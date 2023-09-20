@@ -20,7 +20,7 @@
 //! let loop_handle = event_loop.handle();
 //!
 //! // Insert the wayland source into the calloop's event loop.
-//! WaylandSource::new(event_queue).unwrap().insert(loop_handle).unwrap();
+//! WaylandSource::new(connection, event_queue).insert(loop_handle).unwrap();
 //!
 //! // This will start dispatching the event loop and processing pending wayland requests.
 //! while let Ok(_) = event_loop.dispatch(None, &mut ()) {
@@ -28,8 +28,8 @@
 //! }
 //! ```
 
+#![deny(unsafe_op_in_unsafe_fn)]
 use std::io;
-use std::os::unix::io::{AsRawFd, RawFd};
 
 use calloop::generic::Generic;
 use calloop::{
@@ -38,7 +38,7 @@ use calloop::{
 };
 use rustix::io::Errno;
 use wayland_backend::client::{ReadEventsGuard, WaylandError};
-use wayland_client::{DispatchError, EventQueue};
+use wayland_client::{Connection, DispatchError, EventQueue};
 
 #[cfg(feature = "log")]
 use log::error as log_error;
@@ -57,29 +57,51 @@ use std::eprintln as log_error;
 /// loop and automatically dispatch pending events on the event queue.
 #[derive(Debug)]
 pub struct WaylandSource<D> {
+    // In theory, we could use the same event queue inside `connection_source`
+    // However, calloop's safety requirements mean that we cannot then give
+    // mutable access to the queue, which is incompatible with our current interface
+    // Additionally, `Connection` is cheaply cloneable, so it's not a huge burden
     queue: EventQueue<D>,
-    fd: Generic<RawFd>,
+    connection_source: Generic<Connection>,
     read_guard: Option<ReadEventsGuard>,
+    /// Calloop's before_will_sleep method allows
+    /// skipping the sleeping by returning a `Token`.
+    /// We cannot produce this on the fly, so store it here instead
+    fake_token: Option<Token>,
+    // Some calloop event handlers don't support error handling, so we have to store the error
+    // for a short time until we reach a method which allows it
+    stored_error: Result<(), io::Error>,
 }
 
 impl<D> WaylandSource<D> {
     /// Wrap an [`EventQueue`] as a [`WaylandSource`].
-    pub fn new(queue: EventQueue<D>) -> Result<WaylandSource<D>, WaylandError> {
-        let guard = queue.prepare_read()?;
-        let fd = Generic::new(guard.connection_fd().as_raw_fd(), Interest::READ, Mode::Level);
-        drop(guard);
+    ///
+    /// `queue` must be from the connection `Connection`.
+    /// This is not a safety invariant, but not following this may cause
+    /// freezes or hangs
+    pub fn new(connection: Connection, queue: EventQueue<D>) -> WaylandSource<D> {
+        let connection_source = Generic::new(connection, Interest::READ, Mode::Level);
 
-        Ok(WaylandSource { queue, fd, read_guard: None })
+        WaylandSource {
+            queue,
+            connection_source,
+            read_guard: None,
+            fake_token: None,
+            stored_error: Ok(()),
+        }
     }
 
     /// Access the underlying event queue
     ///
-    /// Note that you should be careful when interacting with it if you invoke
-    /// methods that interact with the wayland socket (such as `dispatch()`
-    /// or `prepare_read()`). These may interfere with the proper waking up
-    /// of this event source in the event loop.
+    /// Note that you should not replace this queue with a queue from a
+    /// different `Connection`, as that may cause freezes or other hangs.
     pub fn queue(&mut self) -> &mut EventQueue<D> {
         &mut self.queue
+    }
+
+    /// Access the connection to the Wayland server
+    pub fn connection(&self) -> &Connection {
+        self.connection_source.get_ref()
     }
 
     /// Insert this source into the given event loop.
@@ -104,51 +126,37 @@ impl<D> EventSource for WaylandSource<D> {
     type Metadata = EventQueue<D>;
     type Ret = Result<usize, DispatchError>;
 
+    const NEEDS_EXTRA_LIFECYCLE_EVENTS: bool = true;
+
     fn process_events<F>(
         &mut self,
-        readiness: Readiness,
-        token: Token,
+        _: Readiness,
+        _: Token,
         mut callback: F,
     ) -> Result<PostAction, Self::Error>
     where
         F: FnMut(Self::Event, &mut Self::Metadata) -> Self::Ret,
     {
+        debug_assert!(self.read_guard.is_none());
+
+        // Take the stored error
+        std::mem::replace(&mut self.stored_error, Ok(()))?;
+
+        // We know that the event will either be a fake event
+        // produced in `before_will_sleep`, or a "real" event from the underlying
+        // source (self.queue_events). Our behaviour in both cases is the same.
+        // In theory we might want to call the process_events handler on the underlying
+        // event source. However, we know that Generic's `process_events` call is a
+        // no-op, so we just handle the event ourselves.
+
         let queue = &mut self.queue;
-        let read_guard = &mut self.read_guard;
+        // Dispatch any pending events in the queue
+        Self::loop_callback_pending(queue, &mut callback)?;
 
-        let action = self.fd.process_events(readiness, token, |_, _| {
-            // 1. read events from the socket if any are available
-            if let Some(guard) = read_guard.take() {
-                // might be None if some other thread read events before us, concurrently
-                if let Err(WaylandError::Io(err)) = guard.read() {
-                    if err.kind() != io::ErrorKind::WouldBlock {
-                        return Err(err);
-                    }
-                }
-            }
+        // Once dispatching is finished, flush the responses to the compositor
+        flush_queue(queue)?;
 
-            // 2. dispatch any pending events in the queue
-            // This is done to ensure we are not waiting for messages that are already in
-            // the buffer.
-            Self::loop_callback_pending(queue, &mut callback)?;
-            *read_guard = Some(Self::prepare_read(queue)?);
-
-            // 3. Once dispatching is finished, flush the responses to the compositor
-            if let Err(WaylandError::Io(e)) = queue.flush() {
-                if e.kind() != io::ErrorKind::WouldBlock {
-                    // in case of error, forward it and fast-exit
-                    return Err(e);
-                }
-                // WouldBlock error means the compositor could not process all
-                // our messages quickly. Either it is slowed
-                // down or we are a spammer. Should not really
-                // happen, if it does we do nothing and will flush again later
-            }
-
-            Ok(PostAction::Continue)
-        })?;
-
-        Ok(action)
+        Ok(PostAction::Continue)
     }
 
     fn register(
@@ -156,7 +164,8 @@ impl<D> EventSource for WaylandSource<D> {
         poll: &mut Poll,
         token_factory: &mut TokenFactory,
     ) -> calloop::Result<()> {
-        self.fd.register(poll, token_factory)
+        self.fake_token = Some(token_factory.token());
+        self.connection_source.register(poll, token_factory)
     }
 
     fn reregister(
@@ -164,44 +173,65 @@ impl<D> EventSource for WaylandSource<D> {
         poll: &mut Poll,
         token_factory: &mut TokenFactory,
     ) -> calloop::Result<()> {
-        self.fd.reregister(poll, token_factory)
+        self.connection_source.reregister(poll, token_factory)
     }
 
     fn unregister(&mut self, poll: &mut Poll) -> calloop::Result<()> {
-        self.fd.unregister(poll)
+        self.connection_source.unregister(poll)
     }
 
-    fn pre_run<F>(&mut self, mut callback: F) -> calloop::Result<()>
-    where
-        F: FnMut((), &mut Self::Metadata) -> Self::Ret,
-    {
+    fn before_sleep(&mut self) -> calloop::Result<Option<(Readiness, Token)>> {
         debug_assert!(self.read_guard.is_none());
 
-        // flush the display before starting to poll
-        if let Err(WaylandError::Io(err)) = self.queue.flush() {
-            if err.kind() != io::ErrorKind::WouldBlock {
-                // in case of error, don't prepare a read, if the error is persistent, it'll
-                // trigger in other wayland methods anyway
-                log_error!("Error trying to flush the wayland display: {}", err);
-                return Err(err.into());
+        flush_queue(&mut self.queue)?;
+
+        self.read_guard = self.queue.prepare_read();
+        match self.read_guard {
+            Some(_) => Ok(None),
+            // If getting the guard failed, that means that there are
+            // events in the queue, and so we need to handle the events instantly
+            // rather than waiting on an event in polling. We tell calloop this
+            // by returning Some here. Note that the readiness value is
+            // never used, so we just need some marker
+            None => Ok(Some((Readiness::EMPTY, self.fake_token.unwrap()))),
+        }
+    }
+
+    fn before_handle_events(&mut self, events: calloop::EventIterator<'_>) {
+        // It's important that the guard isn't held whilst process_events calls occur
+        // This can use arbitrary user-provided code, which may want to use the wayland
+        // socket For example, creating a Vulkan surface needs access to the
+        // connection
+        let guard = self.read_guard.take();
+        if events.count() > 0 {
+            // Read events from the socket if any are available
+            if let Some(Err(WaylandError::Io(err))) = guard.map(ReadEventsGuard::read) {
+                // If some other thread read events before us, concurrently, that's an expected
+                // case, so this error isn't an issue. Other error kinds do need to be returned,
+                // however
+                if err.kind() != io::ErrorKind::WouldBlock {
+                    // before_handle_events doesn't allow returning errors
+                    // For now, cache it in self until process_events is called
+                    self.stored_error = Err(err);
+                }
             }
         }
-
-        // ensure we are not waiting for messages that are already in the buffer.
-        Self::loop_callback_pending(&mut self.queue, &mut callback)?;
-        self.read_guard = Some(Self::prepare_read(&mut self.queue)?);
-
-        Ok(())
     }
+}
 
-    fn post_run<F>(&mut self, _: F) -> calloop::Result<()>
-    where
-        F: FnMut((), &mut Self::Metadata) -> Self::Ret,
-    {
-        // Drop implementation of ReadEventsGuard will do cleanup
-        self.read_guard.take();
-        Ok(())
+fn flush_queue<D>(queue: &mut EventQueue<D>) -> Result<(), calloop::Error> {
+    if let Err(WaylandError::Io(err)) = queue.flush() {
+        // WouldBlock error means the compositor could not process all
+        // our messages quickly. Either it is slowed
+        // down or we are a spammer. Should not really
+        // happen, if it does we do nothing and will flush again later
+        if err.kind() != io::ErrorKind::WouldBlock {
+            // in case of error, forward it and fast-exit
+            log_error!("Error trying to flush the wayland display: {}", err);
+            return Err(err.into());
+        }
     }
+    Ok(())
 }
 
 impl<D> WaylandSource<D> {
@@ -236,17 +266,5 @@ impl<D> WaylandSource<D> {
                 },
             }
         }
-    }
-
-    fn prepare_read(queue: &mut EventQueue<D>) -> io::Result<ReadEventsGuard> {
-        queue.prepare_read().map_err(|err| match err {
-            WaylandError::Io(err) => err,
-
-            WaylandError::Protocol(err) => {
-                log_error!("Protocol error received on display: {}", err);
-
-                Errno::PROTO.into()
-            },
-        })
     }
 }

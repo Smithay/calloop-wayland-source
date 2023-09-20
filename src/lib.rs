@@ -28,7 +28,7 @@
 //! }
 //! ```
 
-#![forbid(unsafe_op_in_unsafe_fn)]
+#![deny(unsafe_op_in_unsafe_fn)]
 use std::io;
 
 use calloop::generic::Generic;
@@ -79,7 +79,6 @@ impl<D> WaylandSource<D> {
     /// `queue` must be from the connection `Connection`.
     /// This is not a safety invariant, but not following this may cause
     /// freezes or hangs
-    #[must_use]
     pub fn new(connection: Connection, queue: EventQueue<D>) -> WaylandSource<D> {
         let connection_source = Generic::new(connection, Interest::READ, Mode::Level);
 
@@ -149,7 +148,6 @@ impl<D> EventSource for WaylandSource<D> {
         // event source. However, we know that Generic's `process_events` call is a no-op,
         // so we just handle the event ourselves.
 
-        // Safety: We don't replace the
         let queue = &mut self.queue;
         // Dispatch any pending events in the queue
         Self::loop_callback_pending(queue, &mut callback)?;
@@ -206,16 +204,14 @@ impl<D> EventSource for WaylandSource<D> {
         let guard = self.read_guard.take();
         if events.count() > 0 {
             // Read events from the socket if any are available
-            if let Some(guard) = guard {
-                if let Err(WaylandError::Io(err)) = guard.read() {
-                    // If some other thread read events before us, concurrently, that's an expected
-                    // case, so this error isn't an issue. Other error kinds do need to be returned,
-                    // however
-                    if err.kind() != io::ErrorKind::WouldBlock {
-                        // before_handle_events doesn't allow returning errors
-                        // For now, cache it in self until process_events is called
-                        self.stored_error = Err(err);
-                    }
+            if let Some(Err(WaylandError::Io(err))) = guard.map(ReadEventsGuard::read) {
+                // If some other thread read events before us, concurrently, that's an expected
+                // case, so this error isn't an issue. Other error kinds do need to be returned,
+                // however
+                if err.kind() != io::ErrorKind::WouldBlock {
+                    // before_handle_events doesn't allow returning errors
+                    // For now, cache it in self until process_events is called
+                    self.stored_error = Err(err);
                 }
             }
         }
@@ -224,15 +220,15 @@ impl<D> EventSource for WaylandSource<D> {
 
 fn flush_queue<D>(queue: &mut EventQueue<D>) -> Result<(), calloop::Error> {
     if let Err(WaylandError::Io(err)) = queue.flush() {
+        // WouldBlock error means the compositor could not process all
+        // our messages quickly. Either it is slowed
+        // down or we are a spammer. Should not really
+        // happen, if it does we do nothing and will flush again later
         if err.kind() != io::ErrorKind::WouldBlock {
             // in case of error, forward it and fast-exit
             log_error!("Error trying to flush the wayland display: {}", err);
             return Err(err.into());
         }
-        // WouldBlock error means the compositor could not process all
-        // our messages quickly. Either it is slowed
-        // down or we are a spammer. Should not really
-        // happen, if it does we do nothing and will flush again later
     }
     Ok(())
 }

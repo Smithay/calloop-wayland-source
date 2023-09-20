@@ -20,7 +20,7 @@
 //! let loop_handle = event_loop.handle();
 //!
 //! // Insert the wayland source into the calloop's event loop.
-//! WaylandSource::new(event_queue).unwrap().insert(loop_handle).unwrap();
+//! WaylandSource::new(connection, event_queue).insert(loop_handle).unwrap();
 //!
 //! // This will start dispatching the event loop and processing pending wayland requests.
 //! while let Ok(_) = event_loop.dispatch(None, &mut ()) {
@@ -93,8 +93,8 @@ impl<D> WaylandSource<D> {
 
     /// Access the underlying event queue
     ///
-    /// Note that you should not replace this queue with a queue from a different
-    /// `Connection`, as that may cause freezes or other hangs.
+    /// Note that you should not replace this queue with a queue from a
+    /// different `Connection`, as that may cause freezes or other hangs.
     pub fn queue(&mut self) -> &mut EventQueue<D> {
         &mut self.queue
     }
@@ -103,6 +103,7 @@ impl<D> WaylandSource<D> {
     pub fn connection(&self) -> &Connection {
         self.connection_source.get_ref()
     }
+
     /// Insert this source into the given event loop.
     ///
     /// This adapter will pass the event loop's shared data as the `D` type for
@@ -145,8 +146,8 @@ impl<D> EventSource for WaylandSource<D> {
         // produced in `before_will_sleep`, or a "real" event from the underlying
         // source (self.queue_events). Our behaviour in both cases is the same.
         // In theory we might want to call the process_events handler on the underlying
-        // event source. However, we know that Generic's `process_events` call is a no-op,
-        // so we just handle the event ourselves.
+        // event source. However, we know that Generic's `process_events` call is a
+        // no-op, so we just handle the event ourselves.
 
         let queue = &mut self.queue;
         // Dispatch any pending events in the queue

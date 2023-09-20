@@ -1,15 +1,12 @@
-use std::{fs::File, os::unix::prelude::AsFd};
+use std::fs::File;
+use std::os::unix::prelude::AsFd;
 
 use calloop::EventLoop;
 use calloop_wayland_source::WaylandSource;
-use wayland_client::{
-    delegate_noop,
-    protocol::{
-        wl_buffer, wl_compositor, wl_keyboard, wl_registry, wl_seat, wl_shm, wl_shm_pool,
-        wl_surface,
-    },
-    Connection, Dispatch, QueueHandle, WEnum,
+use wayland_client::protocol::{
+    wl_buffer, wl_compositor, wl_keyboard, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface,
 };
+use wayland_client::{delegate_noop, Connection, Dispatch, QueueHandle, WEnum};
 
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 
@@ -124,7 +121,8 @@ delegate_noop!(State: ignore wl_shm_pool::WlShmPool);
 delegate_noop!(State: ignore wl_buffer::WlBuffer);
 
 fn draw(tmp: &mut File, (buf_x, buf_y): (u32, u32)) {
-    use std::{cmp::min, io::Write};
+    use std::cmp::min;
+    use std::io::Write;
     let mut buf = std::io::BufWriter::new(tmp);
     for y in 0..buf_y {
         for x in 0..buf_x {

@@ -15,7 +15,7 @@ wayland-client = "0.31.1"
 wayland-backend = "0.3.0"
 calloop = "0.14.0"
 log = { version = "0.4.19", optional = true }
-rustix = { version = "0.38.4", default-features = false, features = ["std"] }
+rustix = { version = "1.0.7", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 tempfile = "3.8.0"

@@ -20,7 +20,7 @@
 //! let loop_handle = event_loop.handle();
 //!
 //! // Insert the wayland source into the calloop's event loop.
-//! WaylandSource::new(connection, event_queue).insert(loop_handle).unwrap();
+//! WaylandSource::new(connection, event_queue).insert(&loop_handle).unwrap();
 //!
 //! // This will start dispatching the event loop and processing pending wayland requests.
 //! while let Ok(_) = event_loop.dispatch(None, &mut ()) {
@@ -108,7 +108,7 @@ impl<D> WaylandSource<D> {
     ///
     /// This adapter will pass the event loop's shared data as the `D` type for
     /// the event loop.
-    pub fn insert(self, handle: LoopHandle<D>) -> Result<RegistrationToken, InsertError<Self>>
+    pub fn insert(self, handle: &LoopHandle<D>) -> Result<RegistrationToken, InsertError<Self>>
     where
         D: 'static,
     {

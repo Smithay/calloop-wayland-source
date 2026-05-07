@@ -64,6 +64,10 @@ pub struct WaylandSource<D> {
     queue: EventQueue<D>,
     connection_source: Generic<Connection>,
     read_guard: Option<ReadEventsGuard>,
+    /// Number of messages read from the socket in before_handle_events. We use
+    /// this to skip dipatching events in cases where the socket becomes
+    /// readable but no messages are available.
+    messages_read: usize,
     /// Calloop's before_will_sleep method allows
     /// skipping the sleeping by returning a `Token`.
     /// We cannot produce this on the fly, so store it here instead
@@ -86,6 +90,7 @@ impl<D> WaylandSource<D> {
             queue,
             connection_source,
             read_guard: None,
+            messages_read: 0,
             fake_token: None,
             stored_error: Ok(()),
         }
@@ -150,8 +155,14 @@ impl<D> EventSource for WaylandSource<D> {
         // no-op, so we just handle the event ourselves.
 
         let queue = &mut self.queue;
-        // Dispatch any pending events in the queue
-        Self::loop_callback_pending(queue, &mut callback)?;
+
+        // Only dispatch if we actually read messages from the socket. Sometimes the
+        // socket becomes readable but there are no messages to read. In such
+        // case, read() returns Ok(0) and we can skip the dispatch entirely.
+        if self.messages_read > 0 {
+            // Dispatch any pending events in the queue
+            Self::loop_callback_pending(queue, &mut callback)?;
+        }
 
         // Once dispatching is finished, flush the responses to the compositor
         flush_queue(queue)?;
@@ -203,17 +214,31 @@ impl<D> EventSource for WaylandSource<D> {
         // socket For example, creating a Vulkan surface needs access to the
         // connection
         let guard = self.read_guard.take();
+        self.messages_read = 0;
+
         if events.count() > 0 {
             // Read events from the socket if any are available
-            if let Some(Err(WaylandError::Io(err))) = guard.map(ReadEventsGuard::read) {
-                // If some other thread read events before us, concurrently, that's an expected
-                // case, so this error isn't an issue. Other error kinds do need to be returned,
-                // however
-                if err.kind() != io::ErrorKind::WouldBlock {
+            match guard.map(ReadEventsGuard::read) {
+                Some(Ok(n)) => {
+                    self.messages_read = n;
+                },
+                Some(Err(WaylandError::Io(err))) => {
+                    // If some other thread read events before us, concurrently, that's an expected
+                    // case, so this error isn't an issue. Other error kinds do need to be returned,
+                    // however
+                    if err.kind() != io::ErrorKind::WouldBlock {
+                        // before_handle_events doesn't allow returning errors
+                        // For now, cache it in self until process_events is called
+                        self.stored_error = Err(err);
+                    }
+                },
+                Some(Err(WaylandError::Protocol(err))) => {
+                    log_error!("Protocol error received on display: {}", err);
                     // before_handle_events doesn't allow returning errors
                     // For now, cache it in self until process_events is called
-                    self.stored_error = Err(err);
-                }
+                    self.stored_error = Err(Errno::PROTO.into());
+                },
+                None => {},
             }
         }
     }

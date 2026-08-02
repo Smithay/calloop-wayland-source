@@ -70,7 +70,7 @@ pub struct WaylandSource<D> {
     fake_token: Option<Token>,
     // Some calloop event handlers don't support error handling, so we have to store the error
     // for a short time until we reach a method which allows it
-    stored_error: Result<(), io::Error>,
+    stored_error: Result<(), calloop::Error>,
 }
 
 impl<D> WaylandSource<D> {
@@ -205,31 +205,46 @@ impl<D> EventSource for WaylandSource<D> {
         let guard = self.read_guard.take();
         if events.count() > 0 {
             // Read events from the socket if any are available
-            if let Some(Err(WaylandError::Io(err))) = guard.map(ReadEventsGuard::read) {
-                // If some other thread read events before us, concurrently, that's an expected
-                // case, so this error isn't an issue. Other error kinds do need to be returned,
-                // however
-                if err.kind() != io::ErrorKind::WouldBlock {
-                    // before_handle_events doesn't allow returning errors
-                    // For now, cache it in self until process_events is called
-                    self.stored_error = Err(err);
+            if let Some(Err(e)) = guard.map(ReadEventsGuard::read) {
+                match e {
+                    WaylandError::Io(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                        // If some other thread read events before us,
+                        // concurrently, that's an expected case, so this error
+                        // isn't an issue. Other error kinds do need to be
+                        // returned, however
+                    },
+                    err => {
+                        // before_handle_events doesn't allow returning errors
+                        // For now, cache it in self until process_events is called
+                        self.stored_error = Err(wayland_to_calloop_error(err))
+                    },
                 }
             }
         }
     }
 }
 
+fn wayland_to_calloop_error(err: WaylandError) -> calloop::Error {
+    match err {
+        WaylandError::Io(e) => calloop::Error::IoError(e),
+        WaylandError::Protocol(e) => calloop::Error::OtherError(e.into()),
+    }
+}
+
 fn flush_queue<D>(queue: &mut EventQueue<D>) -> Result<(), calloop::Error> {
-    if let Err(WaylandError::Io(err)) = queue.flush() {
-        // WouldBlock error means the compositor could not process all
-        // our messages quickly. Either it is slowed
-        // down or we are a spammer. Should not really
-        // happen, if it does we do nothing and will flush again later
-        if err.kind() != io::ErrorKind::WouldBlock {
+    match queue.flush() {
+        Ok(()) => (),
+        Err(WaylandError::Io(err)) if err.kind() == io::ErrorKind::WouldBlock => {
+            // WouldBlock error means the compositor could not process all
+            // our messages quickly. Either it is slowed
+            // down or we are a spammer. Should not really
+            // happen, if it does we do nothing and will flush again later
+        },
+        Err(err) => {
             // in case of error, forward it and fast-exit
             log_error!("Error trying to flush the wayland display: {}", err);
-            return Err(err.into());
-        }
+            return Err(wayland_to_calloop_error(err));
+        },
     }
     Ok(())
 }

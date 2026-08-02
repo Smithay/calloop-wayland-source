@@ -213,6 +213,10 @@ impl<D> EventSource for WaylandSource<D> {
                         // isn't an issue. Other error kinds do need to be
                         // returned, however
                     },
+                    WaylandError::Io(err) if err.kind() == io::ErrorKind::Interrupted => {
+                        // Interrupted by a signal, event loop is expected to
+                        // retry later
+                    },
                     err => {
                         // before_handle_events doesn't allow returning errors
                         // For now, cache it in self until process_events is called
@@ -239,6 +243,9 @@ fn flush_queue<D>(queue: &mut EventQueue<D>) -> Result<(), calloop::Error> {
             // our messages quickly. Either it is slowed
             // down or we are a spammer. Should not really
             // happen, if it does we do nothing and will flush again later
+        },
+        Err(WaylandError::Io(err)) if err.kind() == io::ErrorKind::Interrupted => {
+            // Interrupted by a signal, event loop is expected to retry later
         },
         Err(err) => {
             // in case of error, forward it and fast-exit

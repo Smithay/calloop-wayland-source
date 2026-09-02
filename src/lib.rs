@@ -37,7 +37,7 @@ use calloop::{
     RegistrationToken, Token, TokenFactory,
 };
 use rustix::io::Errno;
-use wayland_backend::client::{ReadEventsGuard, WaylandError};
+use wayland_client::backend::{ReadEventsGuard, WaylandError};
 use wayland_client::{Connection, DispatchError, EventQueue};
 
 #[cfg(feature = "log")]
